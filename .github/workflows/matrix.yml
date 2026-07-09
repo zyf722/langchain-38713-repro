@@ -1,146 +1,69 @@
 name: langchain-38713-repro-matrix
-
+ 
 on:
   workflow_dispatch:
-    inputs:
-      n_core:
-        description: "How many recent langchain-core releases to test"
-        required: false
-        default: "6"
-      n_lg:
-        description: "How many recent langgraph releases to test"
-        required: false
-        default: "6"
   push:
-
+ 
 permissions:
   contents: read
-  checks: write
-
+ 
 jobs:
-  discover:
+  load-matrix:
     runs-on: ubuntu-latest
     outputs:
-      pairs: ${{ steps.build.outputs.pairs }}
+      pairs: ${{ steps.matrix.outputs.pairs }}
     steps:
-      - name: Build cross-product from PyPI
-        id: build
+      - uses: actions/checkout@v6
+ 
+      - name: Read compatible version pairs
+        id: matrix
         run: |
           set -euo pipefail
-
-          recent() {
-            curl -sSf "https://pypi.org/pypi/$1/json" \
-              | jq -r '.releases | to_entries[]
-              | select(.value | length > 0)
-              | select(.value | map(.yanked // false) | all | not)
-              | .key' \
-              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
-              | sort -V \
-              | tail -"$2"
-          }
-
-          cores=$(recent langchain-core "$N_CORE")
-          lgs=$(recent langgraph "$N_LG")
-
-          echo "candidates:"
-          echo "  langchain-core: $(echo $cores | tr '\n' ' ')"
-          echo "  langgraph:      $(echo $lgs | tr '\n' ' ')"
-          echo
-
-          pairs=$(jq -cn \
-            --arg cores "$cores" \
-            --arg lgs "$lgs" \
-            '[ ($cores | split("\n") | map(select(length>0))) as $c
-             | ($lgs   | split("\n") | map(select(length>0))) as $l
-             | $c[] as $core | $l[] as $lg
-             | {core:$core, lg:$lg} ]')
-
-          echo "total pairs: $(echo $pairs | jq 'length')"
+          pairs=$(jq -c '.pairs' version-pairs.json)
+          echo "total pairs: $(echo "$pairs" | jq 'length')"
           echo "pairs=$pairs" >> "$GITHUB_OUTPUT"
-    env:
-      N_CORE: ${{ github.event.inputs.n_core || '6' }}
-      N_LG: ${{ github.event.inputs.n_lg || '6' }}
-
+ 
   test:
-    needs: discover
+    needs: load-matrix
     runs-on: ubuntu-latest
     name: test (core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }})
-    env:
-      RESULT_CHECK_NAME: result (core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }})
     strategy:
       fail-fast: false
       matrix:
-        pair: ${{ fromJSON(needs.discover.outputs.pairs) }}
+        pair: ${{ fromJSON(needs.load-matrix.outputs.pairs) }}
     steps:
       - uses: actions/checkout@v6
-
+ 
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
-
+          python-version: '3.12'
+ 
       - name: Install deps
         id: install
-        continue-on-error: true
         run: |
           pip install --quiet --disable-pip-version-check \
             "langchain-core==${{ matrix.pair.core }}" \
             "langgraph==${{ matrix.pair.lg }}" \
             typing-extensions
-
-      - name: Fail with summary
-        if: steps.install.outcome != 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          {
-            echo "### core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }} (Incompatible / Pip resolve failed)"
-            echo
-            echo "Pip could not resolve the dependencies for this pair."
-          } >> "$GITHUB_STEP_SUMMARY"
-          
-          gh api "repos/${{ github.repository }}/check-runs" \
-            -X POST \
-            -F name="${{ env.RESULT_CHECK_NAME }}" \
-            -F head_sha="${{ github.sha }}" \
-            -F status="completed" \
-            -F conclusion="cancelled" \
-            -F output[title]="Incompatible: core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}" \
-            -F output[summary]="Pip could not resolve the dependencies for this pair."
-
+ 
       - name: Reproduce with summary
-        if: steps.install.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set +e
           python repro.py 2>&1 | tee test.out
           status=${PIPESTATUS[0]}
           set -e
-
+ 
+          if [ "$status" -eq 0 ]; then
+            result="Passed"
+          else
+            result="Error (exit $status)"
+          fi
+ 
           {
-            echo "### core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}"
+            echo "### core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }} ($result)"
             echo '```'
             cat test.out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ "$status" -eq 0 ]; then
-            conclusion="success"
-            title="Success: core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}"
-            summary="repro.py exited successfully for this pair."
-          else
-            conclusion="failure"
-            title="Failure: core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}"
-            summary="repro.py exited with status $status for this pair."
-          fi
-
-          gh api "repos/${{ github.repository }}/check-runs" \
-            -X POST \
-            -F name="${{ env.RESULT_CHECK_NAME }}" \
-            -F head_sha="${{ github.sha }}" \
-            -F status="completed" \
-            -F conclusion="$conclusion" \
-            -F output[title]="$title" \
-            -F output[summary]="$summary"
-          
+ 
           exit "$status"

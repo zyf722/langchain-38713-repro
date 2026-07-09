@@ -6,6 +6,20 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+SAMPLE_INPUT = {"foo": "hello", "bar": "world"}
+
+
+def tool_call_args_from_schema(schema: dict) -> dict[str, str | dict[str, str]]:
+    params = schema.get("function", {}).get("parameters", {})
+    properties = params.get("properties", {}) if isinstance(params, dict) else {}
+    if (
+        isinstance(properties, dict)
+        and "root" in properties
+        and "foo" not in properties
+    ):
+        return {"root": SAMPLE_INPUT}
+    return SAMPLE_INPUT
+
 
 class InputState(TypedDict):
     foo: str
@@ -39,7 +53,7 @@ print(json.dumps(oai_schema, indent=2))
 print()
 
 print("=== Simulating what the LLM sends back per the schema above ===")
-llm_reply = {"root": {"foo": "hello", "bar": "world"}}
+llm_reply = tool_call_args_from_schema(oai_schema)
 print(json.dumps(llm_reply, indent=2))
 print()
 

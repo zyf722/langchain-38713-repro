@@ -64,6 +64,8 @@ jobs:
     needs: discover
     runs-on: ubuntu-latest
     name: test (core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }})
+    env:
+      RESULT_CHECK_NAME: result (core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }})
     strategy:
       fail-fast: false
       matrix:
@@ -86,17 +88,58 @@ jobs:
 
       - name: Fail with summary
         if: steps.install.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "### core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }} (Incompatible / Pip resolve failed)" \
-            >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }} (Incompatible / Pip resolve failed)"
+            echo
+            echo "Pip could not resolve the dependencies for this pair."
+          } >> "$GITHUB_STEP_SUMMARY"
+          
+          gh api "repos/${{ github.repository }}/check-runs" \
+            -X POST \
+            -F name="${{ env.RESULT_CHECK_NAME }}" \
+            -F head_sha="${{ github.sha }}" \
+            -F status="completed" \
+            -F conclusion="cancelled" \
+            -F output[title]="Incompatible: core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}" \
+            -F output[summary]="Pip could not resolve the dependencies for this pair."
 
       - name: Reproduce with summary
         if: steps.install.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set +e
           python repro.py 2>&1 | tee test.out
+          status=${PIPESTATUS[0]}
+          set -e
+
           {
             echo "### core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}"
             echo '```'
             cat test.out
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$status" -eq 0 ]; then
+            conclusion="success"
+            title="Success: core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}"
+            summary="repro.py exited successfully for this pair."
+          else
+            conclusion="failure"
+            title="Failure: core=${{ matrix.pair.core }}, lg=${{ matrix.pair.lg }}"
+            summary="repro.py exited with status $status for this pair."
+          fi
+
+          gh api "repos/${{ github.repository }}/check-runs" \
+            -X POST \
+            -F name="${{ env.RESULT_CHECK_NAME }}" \
+            -F head_sha="${{ github.sha }}" \
+            -F status="completed" \
+            -F conclusion="$conclusion" \
+            -F output[title]="$title" \
+            -F output[summary]="$summary"
+          
+          exit "$status"
